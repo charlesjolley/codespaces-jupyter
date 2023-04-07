@@ -16,10 +16,5 @@
         "ms-python.python"
       ]
     }
-  },
-  "containerEnv": {
-    "OPENAI_API_KEY": "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",
-    "SERPAPI_API_KEY": "abf71d83dfe294730c303a14b9df11e24c4f39b4587742af4399385d366930d9"
   }
 }
-
