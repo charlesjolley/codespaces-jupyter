@@ -15,11 +15,9 @@ personalization information.
 If we learn the wrong thing, or if the user's preferences change we need to
 update our store of facts.
 
+We build a profile on the user. For each input, we ask - what have we learned
+about the user's preferences?
+
 ## Topics
 
-For any given input, and looking at the recent context, we need to determine
-what other context to retrieve to be passed to the ExecutorAgent to decide how
-to respond.
-
-We need this context in order to decide what personalization information to
-retrieve.
+Each time you talk to the assistant it is about a topic. You need to be explicit at first about changing topics.

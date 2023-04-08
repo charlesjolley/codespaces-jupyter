@@ -1,132 +1,198 @@
-""" Memory that learns facts about the user. """
+'''Memory for collecting personal information about the user'''
 
-from langchain.memory import ConversationKGMemory
-from langchain import PromptTemplate
+from datetime import datetime
+from langchain.schema import BaseMemory
 from langchain.llms import OpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores import Chroma
 
-ENTITY_EXTRACTION_TEMPLATE = """
-    You're job is to read a chat between an AI agent and a human and extract all of the entities from the last line of conversation. As a guideline, an entity is usually a proper noun, generally capitalized. You should definitely extract all names and places.
+OBSERVER_VARIABLES = ["input", "chat_history", "current_date"]
+OBSERVER_TEMPLATE = """
+    Below is a chat log between a human user and an AI. The Input is a new 
+    message sent by the user to the chat. Profile context includes relevant observations we know about the user.
 
-    The speakers are also entities. The human entity is called "$USER" and the agent entity called "$AGENT". Resolve any references to the first or second person accordingly. Always include the speaker in the output.
+    Based on the new input, generate observations about who the user is as a person: their preferences, beliefs, personal details, etc. Focus on what you 
+    can learn generally about the user and their personal traits. For any observations that are time dependent (such as a date, meeting, event, holiday, or milestone) start with "As of {current_date}"
 
-    The conversation history is provided just in case of a coreference (e.g. "What do you know about him" where "him" is defined in a previous line) -- ignore items mentioned there that are not in the last line.
+    Output observations should be full sentences and refer to the human as "User",
+    separated by newlines. Include as many relevant details as possible in each statement, including relevant context. Be sure to include any factual statements you can infer about the user. Be sure to include any preferences you can infer based on what and how they choose to do, buy, or travel to. Also include inferrences you can make that are likely about the user's personality based on observable facts.
 
-    Return the output as a single comma-separated list, or NONE if there is nothing of note to return (e.g. the user is just issuing a greeting or having a simple conversation).
+    --EXAMPLES
+    EXAMPLE 1:
 
-    EXAMPLE
-    Conversation history:
-    Human: how's it going today?
-    AI: It's going great! How about you?
-    Human: good! busy working on Langchain. lots to do.
-    AI: What kind of things are you doing to make Langchain better?
-    Last line:
-    Person #1: i'm trying to improve Langchain's interfaces, the UX, its integrations with various products the user might want ... a lot of stuff.
-    Output: $USER, Langchain
-    END OF EXAMPLE
+    Input: Cappuccinos are my favorite coffee drink. I have them every day.
 
-    EXAMPLE
-    Conversation history:
-    Person #1: how's it going today?
-    AI: "It's going great! How about you?"
-    Person #1: good! My name is Charles 
-    AI: "Nice to meet you Charles. What are you up to right now?"
-    Last line:
-    Person #1: I'm getting coffee at Starbucks
-    Output: $USER, Starbucks
-    END OF EXAMPLE
+    Output:
+    User's favorite coffee drink is a cappuccino
+    User is a frequent coffee drinker
 
-    EXAMPLE
-    Conversation history:
-    Last line:
-    Person #1: I prefer you to keep your answers short and to the point.
-    Output: $USER, $AGENT
-    END OF EXAMPLE
+    EXAMPLE 2:
 
-    Conversation history (for reference only):
-    {history}
-    Last line of conversation (for extraction):
-    Human: {input}
+    Current Date: {current_date}
 
-    Output:"""
+    Profile Context:
+    User has a girlfriend named Tiffany
 
-ENTITY_EXTRACTION_PROMPT = PromptTemplate(
-    input_variables=["history", "input"],
-    template=ENTITY_EXTRACTION_TEMPLATE
-)
+    Chat Log:
+
+    Input: Tiffany's car has a flat! Help!
+
+    Output:
+    Tiffany (User's girlfriend) has a car
+    As of {current_date}, Tiffany's (User's girlfriend) car has a flat tire
+    User is asking for help fixing a flat.
+    User's girlfriend might need immediate attention.
+
+    Tiffany (User's girlfriend) has a car
+    As of {current_date}, Tiffany's (User's girlfriend) car has a flat tire
 
 
-KG_TRIPLE_DELIMITER = "<|>"
-KNOWLEDGE_EXTRACTION_TEMPLATE = """
-    Your job is to read a chat transcript between an AI agent and a human and find all of the knowledge triples about all relevant people, things, concepts, etc. and integrating them with your knowledge stored within your weights as well as that stored in a knowledge graph.
-    
-    A knowledge triple is a clause that contains a subject, a predicate, and an object. The subject is the entity being described, the predicate is the property of the subject that is being described, and the object is the value of the property.
+    EXAMPLE 3:
+    Profile Context:
+    User has a girlfriend named Tiffany
 
-    The speakers are also entities. The human is an entity called "$USER" and the agent is an entity called "$AGENT". Resolve any references to the first
-    or second person accordingly.
+    Chat Log:
+    user: Tiffany's car has a flat!
+    agent: I can help with that. What kind of car is it?
 
-    EXAMPLE
-    Conversation history:
-    Person #1: Did you hear aliens landed in Area 51?
-    AI: No, I didn't hear that. What do you know about Area 51?
-    Person #1: It's a secret military base in Nevada.
-    AI: What do you know about Nevada?
-    Last line of conversation:
-    Person #1: It's a state in the US. It's also the number 1 producer of gold in the US.
+    Input: Lamborghini
 
-    Output: (Nevada, is a, state)<|>(Nevada, is in, US)<|>(Nevada, is the number 1 producer of, gold)
-    END OF EXAMPLE
+    Output:
+    Tiffany (User's girlfriend) has a Lamborghini
+    Tiffany (User's girlfriend) is probably into nice cars
 
-    EXAMPLE
-    Conversation history:
-    Person #1: Hello.
-    AI: Hi! How are you?
-    Person #1: I'm good. How are you?
-    AI: I'm good too.
-    Last line of conversation:
-    Human: My name is Charles. I like coffee and donuts.
+    Tiffany (User's girlfriend) has a Lamborghini
+    Tiffany (User's girlfriend) is probably into nice cars
+    --END EXAMPLES
 
-    Output: ($USER, is named, Charles)<|>($USER, likes, coffee)<|>($USER, likes, donuts)
-    END OF EXAMPLE
 
-    EXAMPLE
-    Conversation history:
-    AI: Hi! How can I help you today?
-    Last Line of conversation:
-    Human: I prefer you to keep your answers short and to the point.
-    Output: ($AGENT, short and to the point, answers)
+    Current Date: {current_date}
 
-    EXAMPLE
-    Conversation history:
-    Person #1: What do you know about Descartes?
-    AI: Descartes was a French philosopher, mathematician, and scientist who lived in the 17th century.
-    Person #1: The Descartes I'm referring to is a standup comedian and interior designer from Montreal.
-    AI: Oh yes, He is a comedian and an interior designer. He has been in the industry for 30 years. His favorite food is baked bean pie.
-    Last line of conversation:
-    Person #1: Oh huh. I know Descartes likes to drive antique scooters and play the mandolin.
-    fOutput: (Descartes, likes to drive, antique scooters)<|>(Descartes, plays, mandolin)
-    END OF EXAMPLE
+    Profile Context:
 
-    Conversation history (for reference only):
-    {history}    
-Last line of conversation (for extraction):
-    Human: {input}
+
+    Chat Log:
+    {chat_history}
+
+    Input:
+    {input}
+
+    Output: 
+    """
+
+FILTER_IRRELEVANT_VARIABLES = ["statements"]
+FILTER_IRRELEVANT_TEMPLATE = """
+    Below is a list of statements learned about a user during chat. Output
+    only those statements that are likely to be true in the future as well as
+    right now. Omit statements that are only related to what the user was 
+    looking for during the chat or are tied to a specific event. Do not modify any statements.
+
+    Statements:
+    {statements}
+
+    Output:
+"""
+
+FIND_OUTDATED_VARIABLES = ["new_obs", "old_obs"]
+FIND_OUTDATED_TEMPLATE = """
+    Below are a list of new statements and old statements about a user. New 
+    statements came later than the old statements and might reflect a change in
+    status. Output the list of old statements that are definitely outdated as
+    a result of the new statements. Only output those with high confidence.
+
+    Output should be a JSON array of the type:
+    [...[statement, reason]]
+    where `statement` is the invalid statement and `reason` explains why you
+    think it is invalid.
+
+    New Statements:
+    {new_obs}
+
+    Old Statements:
+    {old_obs}
 
     Output:
     """
 
 
-KNOWLEDGE_TRIPLE_EXTRACTION_PROMPT = PromptTemplate(
-    input_variables=["history", "input"],
-    template=KNOWLEDGE_EXTRACTION_TEMPLATE,
-)
+class ProfileMemory(BaseMemory):
+    """Memory class for collecting information about the user"""
 
+    class Config:
+        '''make pydantic happy'''
+        extra = "allow"
 
-class ProfileMemory(ConversationKGMemory):
-    """ Memory that learns facts about the user."""
+    memory_key = "profile"
     llm = OpenAI(temperature=0)
-    entity_extraction_prompt = ENTITY_EXTRACTION_PROMPT
-    knowledge_extraction_prompt = KNOWLEDGE_TRIPLE_EXTRACTION_PROMPT
+    _db = Chroma.from_texts(["dummy"], collection_name="observations",
+                            embedding=OpenAIEmbeddings())
+    _stored_count = 1
 
-    def save_context(self, inputs, outputs) -> None:
-        print("save_context", inputs, outputs)
-        return super().save_context(inputs, outputs)
+    _observer_chain_inst = None
+    _filter_chain_inst = None
+
+    @property
+    def memory_variables(self):
+        return [self.memory_key]
+
+    def load_memory_variables(self, inputs):
+        '''Load profile data associated with the inputs'''
+        db = self._db
+        message = inputs["input"]
+        k = min(self._stored_count, 5)
+        obs = db.similarity_search(message, k)
+        profile = "\n".join([doc.page_content for doc in obs])
+        return {self.memory_key: profile}
+
+    def save_context(self, inputs, _outputs):
+        '''Collects any observations about the user'''
+
+        # First find all the observations
+        obs_chain = self._observer_chain
+        chat_history = inputs["chat_history"] or ""
+        message = inputs["input"]
+        current_date = datetime.today().strftime('%Y-%m-%d')
+        output = obs_chain.run(
+            input=message,
+            chat_history=chat_history,
+            current_date=current_date
+        )
+
+        # Second, filter the uneccesary ones
+        filter_chain = self._filter_chain
+        new_obs = filter_chain.run(statements=output)
+
+        # Finally, store new observations
+        new_obs = new_obs.split("\n")
+        self._db.add_texts(new_obs)
+        self._stored_count = self._stored_count + len(new_obs)
+
+    def clear(self):
+        '''Clear the stored memory'''
+        print("clear profile memory")
+
+    @property
+    def _observer_chain(self):
+        if self._observer_chain_inst is None:
+            llm = self.llm
+            prompt = PromptTemplate(
+                template=OBSERVER_TEMPLATE,
+                input_variables=OBSERVER_VARIABLES
+            )
+            chain = LLMChain(llm=llm, prompt=prompt)
+            self._observer_chain_inst = chain
+        return self._observer_chain_inst
+
+    @property
+    def _filter_chain(self):
+        if self._filter_chain_inst is None:
+            llm = self.llm
+            prompt = PromptTemplate(
+                template=FILTER_IRRELEVANT_TEMPLATE,
+                input_variables=FILTER_IRRELEVANT_VARIABLES
+            )
+            chain = LLMChain(llm=llm, prompt=prompt)
+            self._filter_chain_inst = chain
+        return self._filter_chain_inst
